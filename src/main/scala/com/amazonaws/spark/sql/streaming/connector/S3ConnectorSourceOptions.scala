@@ -45,6 +45,9 @@ case class S3ConnectorSourceOptions (
   sqsLongPollWaitTimeSeconds: Int,
   sqsVisibilityTimeoutSeconds: Int,
   sqsKeepMessageForConsumerError: Boolean,
+  sqsMaxPendingAcquires: Int,
+  sqsConnectionAcquireTimeout: Int,
+  sqsMaxPoolSize: Int,
 )
 
 object S3ConnectorSourceOptions {
@@ -86,6 +89,14 @@ object S3ConnectorSourceOptions {
   val SQS_MAX_CONCURRENCY_DEFAULT_VALUE: Int = 50
   val SQS_VISIBILITY_TIMEOUT_DEFAULT_VALUE: Int = 60
 
+  val SQS_MAX_PENDING_ACQUIRES: String = SQS_PREFIX + "maxPendingAcquires"
+  val SQS_MAX_PENDING_ACQUIRES_DEFAULT_VALUE: Int = 50
+
+  val SQS_CONNECTION_ACQUIRES_TIMEOUT: String = SQS_PREFIX + "acquisitionTimeout"
+  val SQS_CONNECTION_ACQUIRES_TIMEOUT_DEFAULT_VALUE: Int = 60
+
+  val SQS_MAX_POOL_SIZE: String = SQS_PREFIX + "maxPoolSize"
+  val SQS_MAX_POOL_SIZE_DEFAULT_VALUE: Int = 200
 
   def apply(parameters: Map[String, String]): S3ConnectorSourceOptions = {
 
@@ -172,6 +183,15 @@ object S3ConnectorSourceOptions {
     val queueFetchWaitTimeoutSeconds: Long = withPositiveIntegerParameter(parameters, QUEUE_FETCH_WAIT_TIMEOUT_SECONDS,
       2 * sqsLongPollWaitTimeSeconds)
 
+    val sqsMaxPendingAcquires: Int = withPositiveIntegerParameter(parameters, SQS_MAX_PENDING_ACQUIRES,
+      SQS_MAX_PENDING_ACQUIRES_DEFAULT_VALUE)
+
+    val sqsConnectionAcquireTimeout: Int = withPositiveIntegerParameter(parameters, SQS_CONNECTION_ACQUIRES_TIMEOUT,
+      SQS_CONNECTION_ACQUIRES_TIMEOUT_DEFAULT_VALUE)
+
+    val sqsMaxPoolSize: Int = withPositiveIntegerParameter(parameters, SQS_MAX_POOL_SIZE,
+      SQS_MAX_POOL_SIZE_DEFAULT_VALUE)
+
     new S3ConnectorSourceOptions(
       maxFilesPerTrigger = maxFilesPerTrigger,
       pathGlobFilter = pathGlobFilter,
@@ -189,7 +209,10 @@ object S3ConnectorSourceOptions {
       sqsMaxRetries = sqsMaxRetries,
       sqsMaxConcurrency = sqsMaxConcurrency,
       sqsVisibilityTimeoutSeconds = sqsVisibilityTimeoutSeconds,
-      sqsKeepMessageForConsumerError = sqsKeepMessageForConsumerError
+      sqsKeepMessageForConsumerError = sqsKeepMessageForConsumerError,
+      sqsMaxPendingAcquires = sqsMaxPendingAcquires,
+      sqsMaxPoolSize = sqsMaxPoolSize,
+      sqsConnectionAcquireTimeout = sqsConnectionAcquireTimeout
     )
   }
 
