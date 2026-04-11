@@ -315,11 +315,12 @@ class AsyncSqsClientSuite extends S3ConnectorTestBase{
     val ret = asyncClient.consume(
       (data: FileMetadata[String]) => {
         pathList.append(data.filePath)
+        true
       }
     ).get
 
     ret.size shouldBe createBatchSize
-    ret.foreach(r => r shouldBe  AsyncQueueConsumerResults.Ok)
+    ret.foreach(r => r shouldBe AsyncQueueConsumerResults.NewFile)
     pathList.size shouldBe createBatchSize
     pathList.foreach(p => p shouldEqual "s3://testbucket/valPartition=part1678486410_0/part-00000-created.csv")
     verify(mockAsyncClient, times(1)).receiveMessage(
@@ -345,6 +346,7 @@ class AsyncSqsClientSuite extends S3ConnectorTestBase{
     val ret = asyncClient.consume(
       (data: FileMetadata[String]) => {
         pathList.append(data.filePath)
+        true
       }
     ).get
 
@@ -370,6 +372,7 @@ class AsyncSqsClientSuite extends S3ConnectorTestBase{
     val ret = asyncClient.consume(
       (data: FileMetadata[String]) => {
         pathList.append(data.filePath)
+        true
       }
     ).get
 
@@ -393,6 +396,7 @@ class AsyncSqsClientSuite extends S3ConnectorTestBase{
     val ret = asyncClient.consume(
       (data: FileMetadata[String]) => {
         pathList.append(data.filePath)
+        true
       }
     ).get
     ret.size shouldBe 1
@@ -412,6 +416,7 @@ class AsyncSqsClientSuite extends S3ConnectorTestBase{
     val ret = asyncClient.consume(
       (data: FileMetadata[String]) => {
         pathList.append(data.filePath)
+        true
       }
     ).get
     ret.size shouldBe 1
@@ -433,7 +438,7 @@ class AsyncSqsClientSuite extends S3ConnectorTestBase{
     val ret = asyncClient.consume(
       (data: FileMetadata[String]) => {
         throw new RuntimeException("exception in consumer")
-        pathList.append(data.filePath)
+        true // unreachable — satisfies return type
       }
     ).get
 
@@ -553,6 +558,7 @@ class AsyncSqsClientSuite extends S3ConnectorTestBase{
       Some((data: FileMetadata[String]) => {
         logInfo(s"consumer data: ${data}")
         data.messageId.map(fetchThreadAsyncClient.handleProcessedMessage)
+        true
       })
     )
 
@@ -587,6 +593,7 @@ class AsyncSqsClientSuite extends S3ConnectorTestBase{
       Some((data: FileMetadata[String]) => {
         logInfo(s"consumer data: ${data}")
         data.messageId.map(fetchThreadAsyncClient.handleProcessedMessage)
+        true
       })
     )
 
@@ -614,6 +621,7 @@ class AsyncSqsClientSuite extends S3ConnectorTestBase{
       sourceOptions,
       Some((data: FileMetadata[String]) => {
         logInfo(s"consumer data: ${data}")
+        true
       })
     )
 
@@ -645,6 +653,7 @@ class AsyncSqsClientSuite extends S3ConnectorTestBase{
         if(count.sum() > SUCCESS_CONSUME_CNT) {
           throw new RuntimeException("runtime exception in consumer")
         }
+        true
       })
     )
 
