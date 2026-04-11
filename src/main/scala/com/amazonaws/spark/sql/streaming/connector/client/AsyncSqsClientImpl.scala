@@ -19,7 +19,7 @@ package com.amazonaws.spark.sql.streaming.connector.client
 import java.net.URLDecoder
 import java.nio.charset.StandardCharsets
 import java.util.concurrent._
-import java.util.function.{BiConsumer, BiFunction, Consumer}
+import java.util.function.{BiConsumer, BiFunction}
 
 import scala.collection.JavaConverters.{collectionAsScalaIterableConverter, seqAsJavaListConverter}
 import scala.collection.mutable.ArrayBuffer
@@ -43,7 +43,7 @@ import org.apache.spark.sql.streaming.connector.s3.S3SparkUtils.{newDaemonFixedT
 
 class AsyncSqsClientImpl[T] (client: SqsAsyncClient,
                           sourceOptions: S3ConnectorSourceOptions,
-                          messageConsumer: Option[Consumer[FileMetadata[T]]]
+                          messageConsumer: Option[FileMetadata[T] => Boolean]
                          ) extends AsyncQueueClient[T] with Logging {
 
   override val queueUrl: String = sourceOptions.queueUrl
@@ -68,8 +68,6 @@ class AsyncSqsClientImpl[T] (client: SqsAsyncClient,
         .handle((results: Seq[AsyncQueueConsumerResult], ex: Throwable) => {
           if (ex == null) {
             results.foreach {
-              case AsyncQueueConsumerResults.Ok =>
-                metrics.fetchThreadConsumeMessageCounter.inc()
               case AsyncQueueConsumerResults.ConsumerException =>
                 logError(s"sqsAsyncFetchMessagesThread consumer throws exception.")
                 metrics.fetchThreadConsumeMessageFailedCounter.inc()
@@ -96,6 +94,7 @@ class AsyncSqsClientImpl[T] (client: SqsAsyncClient,
           //  May need to stop the thread if these happen
 
           breakable {
+            var newFileCnt = 0
             var totalMsgCnt = 0
             while (!Thread.currentThread.isInterrupted) {
               val futures: ArrayBuffer[CompletableFuture[Seq[AsyncQueueConsumerResult]]] = ArrayBuffer.empty
@@ -118,7 +117,15 @@ class AsyncSqsClientImpl[T] (client: SqsAsyncClient,
                   futures
                     .flatMap(f => f.join)
                     .collect {
-                      case AsyncQueueConsumerResults.Ok => totalMsgCnt += 1
+                      // NewFile: a genuinely new file was added to the cache — counts toward the trigger limit
+                      case AsyncQueueConsumerResults.NewFile =>
+                        newFileCnt += 1
+                        totalMsgCnt += 1
+                        metrics.fetchThreadConsumeMessageCounter.inc()
+                      // Duplicate: file already in cache or already processed — does NOT count toward limit
+                      case AsyncQueueConsumerResults.Duplicate =>
+                        totalMsgCnt += 1
+                        metrics.fetchThreadConsumeMessageCounter.inc()
                       case AsyncQueueConsumerResults.ReceiveEmpty => emptyMsgCnt += 1
                       case _ => errorMsgCnt += 1
                     }
@@ -126,15 +133,15 @@ class AsyncSqsClientImpl[T] (client: SqsAsyncClient,
                 }
                 .join
 
-              logDebug(s"sqsAsyncFetchMessagesThread totalMsgCnt ${totalMsgCnt}," +
+              logDebug(s"sqsAsyncFetchMessagesThread newFileCnt ${newFileCnt}, totalMsgCnt ${totalMsgCnt}," +
                 s" last batch emptyMsgCnt ${emptyMsgCnt}, errorMsgCnt ${errorMsgCnt}.")
 
               if(
-                (emptyMsgCnt == poolSize  && ((System.currentTimeMillis() - startTime) > waitTimeoutSecond * 1000))
-                  || totalMsgCnt >= sourceOptions.maxFilesPerTrigger.getOrElse(Int.MaxValue)
+                (emptyMsgCnt == poolSize && ((System.currentTimeMillis() - startTime) > waitTimeoutSecond * 1000))
+                  || newFileCnt >= sourceOptions.maxFilesPerTrigger.getOrElse(Int.MaxValue)
               ) {
-                logInfo(s"sqsAsyncFetchMessagesThread stop fetching new messages.totalMsgCnt ${totalMsgCnt}," +
-                  s" last batch emptyMsgCnt ${emptyMsgCnt}, errorMsgCnt ${errorMsgCnt}.")
+                logInfo(s"sqsAsyncFetchMessagesThread stop fetching. newFileCnt ${newFileCnt}," +
+                  s" totalMsgCnt ${totalMsgCnt}, emptyMsgCnt ${emptyMsgCnt}, errorMsgCnt ${errorMsgCnt}.")
                 break
               }
             }
@@ -360,7 +367,7 @@ class AsyncSqsClientImpl[T] (client: SqsAsyncClient,
   }
 
   private def consumeInternal(
-                               consumer: BiFunction[FileMetadata[T], Executor, CompletableFuture[Void]]
+                               consumer: BiFunction[FileMetadata[T], Executor, CompletableFuture[Boolean]]
              ): CompletableFuture[Seq[AsyncQueueConsumerResult]] = {
 
     getMessage
@@ -390,7 +397,7 @@ class AsyncSqsClientImpl[T] (client: SqsAsyncClient,
   }
 
   private def aggregateResults(response: ReceiveMessageResponse,
-                               consumer: BiFunction[FileMetadata[T], Executor, CompletableFuture[Void]]
+                               consumer: BiFunction[FileMetadata[T], Executor, CompletableFuture[Boolean]]
                               ): CompletableFuture[Seq[AsyncQueueConsumerResult]] = {
     var aggregatedFuture: CompletableFuture[Seq[AsyncQueueConsumerResult]] = null
 
@@ -402,10 +409,11 @@ class AsyncSqsClientImpl[T] (client: SqsAsyncClient,
             logDebug(s"Retrieved message ${message.receiptHandle}")
             consumer
               .apply(parsedMessage, consumerExecutor)
-              .handle[AsyncQueueConsumerResult]((_, ex: Throwable) => {
+              .handle[AsyncQueueConsumerResult]((isNewFile: Boolean, ex: Throwable) => {
                 if (ex == null) {
                   metrics.consumeMessageCounter.inc()
-                  AsyncQueueConsumerResults.Ok
+                  if (isNewFile) AsyncQueueConsumerResults.NewFile
+                  else AsyncQueueConsumerResults.Duplicate
                 } else {
                   metrics.consumeMessageFailedCounter.inc()
                   logError("Exception occurred while consuming message from queue.", ex)
@@ -465,10 +473,10 @@ class AsyncSqsClientImpl[T] (client: SqsAsyncClient,
   }
 
   override def consume(
-                consumer: Consumer[FileMetadata[T]]
+                consumer: FileMetadata[T] => Boolean
               ): CompletableFuture[Seq[AsyncQueueConsumerResult]] = {
     consumeInternal(
-      (msg, executor: Executor) => CompletableFuture.runAsync(() => consumer.accept(msg), executor)
+      (msg, executor: Executor) => CompletableFuture.supplyAsync(() => consumer.apply(msg), executor)
     );
   }
 

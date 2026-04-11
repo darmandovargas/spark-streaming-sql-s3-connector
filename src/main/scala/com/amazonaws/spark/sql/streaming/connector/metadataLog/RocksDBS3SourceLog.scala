@@ -21,6 +21,7 @@ import java.io.{ByteArrayInputStream, ByteArrayOutputStream, InputStreamReader}
 import java.nio.charset.StandardCharsets
 import java.time.Instant
 import java.util.concurrent.{ScheduledFuture, TimeUnit}
+import java.util.concurrent.locks.ReentrantReadWriteLock
 
 import scala.reflect.ClassTag
 import scala.util.{Failure, Success, Try}
@@ -48,6 +49,11 @@ import org.apache.spark.unsafe.types.UTF8String
 class RocksDBS3SourceLog extends S3MetadataLog with Logging {
 
   import RocksDBS3SourceLog._
+
+  // RocksDB is not thread-safe. Consumer callback threads call isNewFile (read) concurrently
+  // with the trigger thread calling add (write). Use a ReadWriteLock so that multiple consumer
+  // threads can read simultaneously, but writes take exclusive access.
+  private val rwLock = new ReentrantReadWriteLock()
 
   private implicit val formats = Serialization.formats(NoTypeHints)
 
@@ -204,6 +210,10 @@ class RocksDBS3SourceLog extends S3MetadataLog with Logging {
       val batchValue = dataToBatchValueRow(fileEntries, timestamp, valueProj)
       val encoder: RocksDBStateEncoder = RocksDBStateEncoder.getEncoder(keySchema, valueSchema, 1)
 
+      // Acquire write lock: blocks until all in-flight isNewFile reads complete, then takes
+      // exclusive access so that consumer threads cannot read while we are writing.
+      val writeLock = rwLock.writeLock()
+      writeLock.lock()
       try {
         reportTimeTaken("RocksDBS3SourceLog cleanlog") {
           // Clean log before add a batch so that the latest batch is never removed
@@ -250,6 +260,8 @@ class RocksDBS3SourceLog extends S3MetadataLog with Logging {
           logError(s"Error when add batch ${batchId}, " +
             s"fileEntries ${fileEntries.mkString("Array(", ", ", ")")}: ", e)
           throw e
+      } finally {
+        writeLock.unlock()
       }
     }
   }
@@ -314,6 +326,8 @@ class RocksDBS3SourceLog extends S3MetadataLog with Logging {
   }
 
   override def getFile(path: String): Option[Long] = {
+    val readLock = rwLock.readLock()
+    readLock.lock()
     try {
       val encoder: RocksDBStateEncoder = RocksDBStateEncoder.getEncoder(keySchema, valueSchema, 1)
       val keyProj: UnsafeProjection = UnsafeProjection.create(keySchema)
@@ -331,6 +345,8 @@ class RocksDBS3SourceLog extends S3MetadataLog with Logging {
         case NonFatal(e) =>
           logError(s"getFile ${path} failed", e)
           throw e
+    } finally {
+      readLock.unlock()
     }
   }
 

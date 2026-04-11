@@ -18,7 +18,6 @@ package com.amazonaws.spark.sql.streaming.connector.client
 
 import java.io.Closeable
 import java.util.concurrent.{CompletableFuture, Future}
-import java.util.function.Consumer
 
 import com.amazonaws.spark.sql.streaming.connector.FileMetadata
 import com.amazonaws.spark.sql.streaming.connector.client.AsyncQueueConsumerResults.AsyncQueueConsumerResult
@@ -45,7 +44,7 @@ trait AsyncQueueClient[T] extends Closeable {
   def handleProcessedMessageBatch(messageIds: Seq[T]): Seq[CompletableFuture[Boolean]]
   def setMessageVisibility(messageId: T,
                            visibilityTimeoutSeconds: Int): CompletableFuture[Boolean]
-  def consume(consumer: Consumer[FileMetadata[T]]): CompletableFuture[Seq[AsyncQueueConsumerResult]]
+  def consume(consumer: FileMetadata[T] => Boolean): CompletableFuture[Seq[AsyncQueueConsumerResult]]
   def metrics: AsyncClientMetrics
   def asyncFetch(waitTimeoutSecond: Long): Future[_]
   def awaitFetchReady(future: Future[_], timeoutSecond: Long): Unit
@@ -53,5 +52,7 @@ trait AsyncQueueClient[T] extends Closeable {
 
 object AsyncQueueConsumerResults extends Enumeration {
   type AsyncQueueConsumerResult = Value
-  val Ok, ReceiveEmpty, ParseNone, ReceiveException, ConsumerException = Value
+  // NewFile: consumer added a genuinely new file to the cache (counts toward maxFilesPerTrigger)
+  // Duplicate: consumer saw a file already in cache or already processed (does NOT count)
+  val NewFile, Duplicate, ReceiveEmpty, ParseNone, ReceiveException, ConsumerException = Value
 }
