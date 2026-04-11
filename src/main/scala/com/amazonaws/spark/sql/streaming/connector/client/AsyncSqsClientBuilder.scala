@@ -35,21 +35,17 @@ import software.amazon.awssdk.services.sqs.SqsAsyncClient
 class AsyncSqsClientBuilder[T] extends AsyncClientBuilder[T] {
 
   var options: S3ConnectorSourceOptions = _
-  var consumer: (FileMetadata[T]) => Unit = _
+  var consumer: (FileMetadata[T]) => Boolean = _
 
   private val credentialsProvider: AwsCredentialsProvider =
     ConnectorAwsCredentialsProvider.builder.build().provider
-
-  implicit def toConsumer[A](function: A => Unit): Consumer[A] = new Consumer[A]() {
-    override def accept(arg: A): Unit = function.apply(arg)
-  }
 
   override def sourceOptions(options: S3ConnectorSourceOptions): AsyncClientBuilder[T] = {
     this.options = options
     this
   }
 
-  override def consumer(function: FileMetadata[T] => Unit): AsyncClientBuilder[T] = {
+  override def consumer(function: FileMetadata[T] => Boolean): AsyncClientBuilder[T] = {
     this.consumer = function
     this
   }

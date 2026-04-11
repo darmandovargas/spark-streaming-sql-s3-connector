@@ -20,6 +20,6 @@ import com.amazonaws.spark.sql.streaming.connector.{FileMetadata, S3ConnectorSou
 
 trait AsyncClientBuilder[T] {
   def sourceOptions(options: S3ConnectorSourceOptions): AsyncClientBuilder[T]
-  def consumer(function: FileMetadata[T] => Unit): AsyncClientBuilder[T]
+  def consumer(function: FileMetadata[T] => Boolean): AsyncClientBuilder[T]
   def build(): AsyncQueueClient[T]
 }

@@ -76,26 +76,33 @@ class S3ConnectorSource[T](sparkSession: SparkSession,
       .consumer(
         (msg: FileMetadata[T]) => {
           val validateResult = fileValidator.isValidNewFile(msg.filePath, msg.timestampMs)
-          if ( validateResult == FileValidResults.Ok) {
-            logDebug(s"SQS message consumer file add to cache: ${msg}")
+          if (validateResult == FileValidResults.Ok) {
             val msgDesc = QueueMessageDesc[T](msg.timestampMs, isProcessed = false, msg.messageId)
             val result = fileCache.addIfAbsent(msg.filePath, msgDesc)
             if (result != msgDesc) {
-              // This could happen as isValidFile check and adding to fileCache are not atomic.
-              // Don't delete the message, let it retry instead.
-              logWarning(s"SQS message consumer the message was not added to cache: ${msg}," +
-                s"as same path already exist in cache: ${result}. The message will be retried.")
-              msg.messageId.map(sqsClient.setMessageVisibility(_, sourceOptions.sqsVisibilityTimeoutSeconds))
+              // isValidNewFile and addIfAbsent are not atomic: a concurrent thread inserted the same
+              // path in the window between the two calls. Resolve based on the existing entry state.
+              if (result.isProcessed) {
+                logDebug(s"SQS message consumer file already processed (concurrent insert): ${msg}")
+                msg.messageId.map(sqsClient.deleteInvalidMessageIfNecessary(_))
+              } else {
+                logDebug(s"SQS message consumer file already in cache (concurrent insert): ${msg}")
+                msg.messageId.map(sqsClient.setMessageVisibility(_, sourceOptions.sqsVisibilityTimeoutSeconds))
+              }
+              false // duplicate — does not count toward maxFilesPerTrigger
+            } else {
+              logDebug(s"SQS message consumer file added to cache: ${msg}")
+              true // new file — counts toward maxFilesPerTrigger
             }
           } else if (validateResult == FileValidResults.ExistInCacheNotProcessed) {
-            // This can happen when the filePath is not processed/persisted yet but visibilityTimeout.
-            // Do not delete the message. Let it retry until the filePath is persisted.
-            logWarning(s"SQS message consumer file already exists in cache: ${msg}.")
+            // SQS redelivered before the file was committed. Retry later.
+            logDebug(s"SQS message consumer file already in cache (not processed): ${msg}")
             msg.messageId.map(sqsClient.setMessageVisibility(_, sourceOptions.sqsVisibilityTimeoutSeconds))
+            false
           } else {
-            logWarning(s"SQS message consumer delete msg of invalid file: ${msg}." +
-              s" Reason: ${validateResult}")
+            logDebug(s"SQS message consumer drop message, reason: ${validateResult}: ${msg}")
             msg.messageId.map(sqsClient.deleteInvalidMessageIfNecessary(_))
+            false
           }
         }
       )
