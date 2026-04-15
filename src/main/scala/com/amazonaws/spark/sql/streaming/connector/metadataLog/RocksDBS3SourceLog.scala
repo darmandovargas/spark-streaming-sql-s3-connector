@@ -18,6 +18,7 @@
 package com.amazonaws.spark.sql.streaming.connector.metadataLog
 
 import java.io.{ByteArrayInputStream, ByteArrayOutputStream, InputStreamReader}
+import java.util.zip.{GZIPInputStream, GZIPOutputStream}
 import java.nio.charset.StandardCharsets
 import java.time.Instant
 import java.util.concurrent.{ScheduledFuture, TimeUnit}
@@ -281,6 +282,40 @@ class RocksDBS3SourceLog extends S3MetadataLog with Logging {
     Serialization.read[T](reader)
   }
 
+  private def compress(bytes: Array[Byte]): Array[Byte] = {
+    val bos = new ByteArrayOutputStream(1024 * 1024)
+    val gzip = new GZIPOutputStream(bos)
+    try {
+      gzip.write(bytes)
+    } finally {
+      gzip.close()
+    }
+    bos.toByteArray
+  }
+
+  // Detects gzip by its magic bytes (0x1f 0x8b). JSON arrays always start with '[' (0x5b),
+  // so this is safe for backward-compatible reading of uncompressed data written by older versions.
+  private def maybeDecompress(bytes: Array[Byte]): Array[Byte] = {
+    if (bytes.length >= 2 && (bytes(0) & 0xFF) == 0x1f && (bytes(1) & 0xFF) == 0x8b) {
+      val bis = new ByteArrayInputStream(bytes)
+      val gzip = new GZIPInputStream(bis)
+      try {
+        val bos = new ByteArrayOutputStream()
+        val buf = new Array[Byte](65536)
+        var len = gzip.read(buf)
+        while (len > 0) {
+          bos.write(buf, 0, len)
+          len = gzip.read(buf)
+        }
+        bos.toByteArray
+      } finally {
+        gzip.close()
+      }
+    } else {
+      bytes
+    }
+  }
+
   def dataToPrefixKeyRow(t: Byte, prefixKeyProj: UnsafeProjection): UnsafeRow = {
     prefixKeyProj.apply(new GenericInternalRow(Array[Any](t))).copy()
   }
@@ -301,7 +336,7 @@ class RocksDBS3SourceLog extends S3MetadataLog with Logging {
     }
 
     valueProj.apply(
-      new GenericInternalRow(Array[Any](serialize[Array[FileEntry]](entries), ts))).copy()
+      new GenericInternalRow(Array[Any](compress(serialize[Array[FileEntry]](entries)), ts))).copy()
   }
 
   override def isNewFile(path: String, lastPurgeTimestamp: Long): Boolean = {
@@ -361,7 +396,7 @@ class RocksDBS3SourceLog extends S3MetadataLog with Logging {
         batchValue match {
           case Some(encodedRow) =>
             val serializedRow = encoder.decodeValue(encodedRow)
-            val fileEntries = deserialize[Array[FileEntry]](serializedRow.getBinary(0))
+            val fileEntries = deserialize[Array[FileEntry]](maybeDecompress(serializedRow.getBinary(0)))
             logInfo(s"RocksDBS3SourceLog.get for batchId ${batchId} with ${fileEntries.length} fileEntries.")
             logTrace(s"RocksDBS3SourceLog.get fileEntries for batchId ${batchId}: ${fileEntries.mkString}")
             Some(fileEntries)
@@ -416,7 +451,7 @@ class RocksDBS3SourceLog extends S3MetadataLog with Logging {
         val batchId = rowBatchId.getUTF8String(1)
         val rowValue = encoder.decodeValue(kv.value)
         val batchTimestamp = rowValue.getLong(1)
-        val fileEntries = deserialize[Array[FileEntry]](rowValue.getBinary(0))
+        val fileEntries = deserialize[Array[FileEntry]](maybeDecompress(rowValue.getBinary(0)))
 
         logInfo(s"printAllBatchesInRocksDB batch Id ${batchId}, batchTimestamp ${batchTimestamp}," +
           s" fileEntries size ${fileEntries.length}, fileEntries ${fileEntries.mkString}")
@@ -450,7 +485,7 @@ class RocksDBS3SourceLog extends S3MetadataLog with Logging {
         if(batchTimestamp < lastPurgeTimestamp) {
           val rowBatchId = encoder.decodeKey(kv.key)
           val batchId = rowBatchId.getUTF8String(1)
-          val fileEntries = deserialize[Array[FileEntry]](rowValue.getBinary(0))
+          val fileEntries = deserialize[Array[FileEntry]](maybeDecompress(rowValue.getBinary(0)))
 
           var latestFileTimestamp: Long = 0L
           fileEntries.foreach { entry =>
