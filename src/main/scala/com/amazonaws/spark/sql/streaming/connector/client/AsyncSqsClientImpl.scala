@@ -58,6 +58,10 @@ class AsyncSqsClientImpl[T] (client: SqsAsyncClient,
   val asyncSqsFetchExecutor: ScheduledExecutorService = newDaemonSingleThreadScheduledExecutor(
     "asyncSqsFetch")
 
+  // Dedicated single-thread executor for background delete waves.
+  // Keeps delete traffic off the consumer pool and the HTTP pending queue.
+  val deleteExecutor: ExecutorService = newDaemonSingleThreadScheduledExecutor("asyncSqsDeletePool")
+
   override def asyncFetch(waitTimeoutSecond: Long): Future[_] = {
     require(messageConsumer.isDefined, "Message consumer must be defined to start asyncFetch")
 
@@ -202,7 +206,27 @@ class AsyncSqsClientImpl[T] (client: SqsAsyncClient,
 
   override def handleProcessedMessageBatch(messageIds: Seq[T]): Seq[CompletableFuture[Boolean]] = {
     reportTimeTaken(s"handleProcessedMessageBatch for ${messageIds.size} messages") {
-      deleteMessageBatch(messageIds)
+      // AWS SQS caps DeleteMessageBatch at 10 messages per call, so 3M files = 300K HTTP calls.
+      // Firing all 300K simultaneously would overflow maxPendingConnectionAcquires.
+      // Solution: submit wave logic to a background single-thread executor so getOffset() returns
+      // immediately (no delay), while deletes proceed in waves of poolSize in the background.
+      // Peak HTTP pending = poolSize instead of 300K. Safe because SQS_VISIBILITY_TIMEOUT
+      // covers fetch time + wave drain time (600s fetch + ~300s drain = 900s total).
+      val receiptBatches = messageIds.sliding(MAX_SQS_BATCH_SIZE, MAX_SQS_BATCH_SIZE).toList
+      CompletableFuture.runAsync(() => {
+        receiptBatches.grouped(poolSize).foreach { wave =>
+          val futures = wave.map { batch =>
+            val ret = new CompletableFuture[Boolean]()
+            deleteMessageBatchInternal(batch).whenComplete(
+              deleteMessageBatchPostProcessing(batch, ret)
+            )
+            ret
+          }
+          CompletableFuture.allOf(futures: _*).join()
+        }
+        logInfo(s"handleProcessedMessageBatch completed deleting ${messageIds.size} messages in background.")
+      }, deleteExecutor)
+      Seq.empty
     }
   }
 
@@ -484,6 +508,7 @@ class AsyncSqsClientImpl[T] (client: SqsAsyncClient,
     // order matters for a graceful shutdown - the client is closed at the end after all executors shutdown
     shutdownAndAwaitTermination(asyncSqsFetchExecutor)
     shutdownAndAwaitTermination(consumerExecutor)
+    shutdownAndAwaitTermination(deleteExecutor)
     client.close()
   }
 }
