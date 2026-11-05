@@ -474,7 +474,10 @@ class RocksDBS3SourceLog extends S3MetadataLog with Logging {
     val prefixIter = rocksDB.prefixScan(encoder.encodePrefixKey(prefix))
 
     var counter: Int = 0
-    for (kv <- prefixIter if counter < MAX_BATCH_TO_REMOVE_PER_ADD) {
+    // Stop as soon as the removal budget is used: a `for ... if` guard only skips the body and
+    // keeps walking (and reading the value of) every remaining batch row.
+    while (counter < MAX_BATCH_TO_REMOVE_PER_ADD && prefixIter.hasNext) {
+      val kv = prefixIter.next()
       try {
         val rowValue = encoder.decodeValue(kv.value)
         val batchTimestamp = rowValue.getLong(1)

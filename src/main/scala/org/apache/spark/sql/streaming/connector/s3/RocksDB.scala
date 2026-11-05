@@ -241,6 +241,14 @@ class RocksDB(
       logInfo(s"Writing updates for $newVersion")
       val writeTimeMs = timeTakenMs { db.write(writeOptions, writeBatch) }
 
+      // The batch is persisted in the DB now. The source log never calls load() again after
+      // init, so without this the batch (and its index) keeps every put/delete since startup:
+      // each commit re-writes all of it, native memory grows, and iterators created on top of it
+      // (cleanLog prefix scan) get slower with the driver uptime. The iterators go first because
+      // they reference the batch and a snapshot taken before this commit.
+      closePrefixScanIterators()
+      writeBatch.clear()
+
       logInfo(s"Flushing updates for $newVersion")
       val flushTimeMs = timeTakenMs { db.flush(flushOptions) }
 
