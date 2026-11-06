@@ -16,7 +16,7 @@
  */
 package com.amazonaws.spark.sql.streaming.connector.client
 
-import java.util.concurrent.CompletableFuture
+import java.util.concurrent.{CompletableFuture, TimeUnit}
 import java.util.concurrent.atomic.LongAdder
 
 import scala.collection.JavaConverters.seqAsJavaListConverter
@@ -822,14 +822,23 @@ class AsyncSqsClientSuite extends S3ConnectorTestBase{
     )
   }
 
+  // handleProcessedMessageBatch deletes in the background on a single thread executor and returns
+  // right away. The executor is FIFO, so once this no-op task runs, all deletes submitted before it
+  // (and their metrics) are complete.
+  private def awaitBackgroundDeletes(): Unit = {
+    asyncClient.deleteExecutor.submit(new Runnable { override def run(): Unit = () })
+      .get(10, TimeUnit.SECONDS)
+  }
+
   test("AsyncSqsClientImpl handleProcessedMessageBatch") {
 
     setMockDeleteMassageBatchResponse(mockAsyncClient, 1, 0)
     setMockDeleteMassageException(mockAsyncClient)
 
+    // deletes run in the background, so no futures are returned to the caller
     val processResult = asyncClient.handleProcessedMessageBatch(Seq("processed1"))
-    processResult.size shouldBe 1
-    processResult.head.get shouldBe true
+    processResult.size shouldBe 0
+    awaitBackgroundDeletes()
 
     verify(mockAsyncClient, times(1)).deleteMessageBatch(
       DeleteMessageBatchRequest.builder()
@@ -865,8 +874,8 @@ class AsyncSqsClientSuite extends S3ConnectorTestBase{
     setMockDeleteMassageException(mockAsyncClient)
 
     val processResult = asyncClient.handleProcessedMessageBatch(Seq("processed1"))
-    processResult.size shouldBe 1
-    processResult.head.get shouldBe false
+    processResult.size shouldBe 0
+    awaitBackgroundDeletes()
 
     verify(mockAsyncClient, times(1)).deleteMessageBatch(
       DeleteMessageBatchRequest.builder()

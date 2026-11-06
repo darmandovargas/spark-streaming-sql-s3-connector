@@ -17,14 +17,10 @@
 package com.amazonaws.spark.sql.streaming.connector.client
 
 import java.time.Duration
-import java.util.function.Consumer
-import scala.language.implicitConversions
+
 import com.amazonaws.spark.sql.streaming.connector.{ConnectorAwsCredentialsProvider, FileMetadata, S3ConnectorSourceOptions}
-import com.amazonaws.spark.sql.streaming.connector.Utils.DEFAULT_CONNECTION_ACQUIRE_TIMEOUT
-import jdk.internal.net.http.common.Log.logError
 import software.amazon.awssdk.auth.credentials.AwsCredentialsProvider
 import software.amazon.awssdk.core.client.config.ClientOverrideConfiguration
-import software.amazon.awssdk.core.exception.SdkClientException
 import software.amazon.awssdk.core.retry.RetryPolicy
 import software.amazon.awssdk.core.retry.backoff.BackoffStrategy
 import software.amazon.awssdk.core.retry.conditions.RetryCondition
@@ -59,38 +55,29 @@ class AsyncSqsClientBuilder[T] extends AsyncClientBuilder[T] {
   }
 
   private def getAsyncSQSClient(options: S3ConnectorSourceOptions): SqsAsyncClient = {
-    try {
-      val retryPolicy = RetryPolicy.builder
-        .numRetries(options.sqsMaxRetries)
-        .retryCondition(RetryCondition.defaultRetryCondition)
-        .backoffStrategy(BackoffStrategy.defaultThrottlingStrategy)
-        .build
+    val retryPolicy = RetryPolicy.builder
+      .numRetries(options.sqsMaxRetries)
+      .retryCondition(RetryCondition.defaultRetryCondition)
+      .backoffStrategy(BackoffStrategy.defaultThrottlingStrategy)
+      .build
 
-      val clientOverrideConfiguration = ClientOverrideConfiguration.builder
-        .retryPolicy(retryPolicy)
-        .build
+    val clientOverrideConfiguration = ClientOverrideConfiguration.builder
+      .retryPolicy(retryPolicy)
+      .build
 
-      SqsAsyncClient.builder
-        .httpClient(
-          NettyNioAsyncHttpClient
-          .builder()
-          .maxConcurrency(options.sqsMaxConcurrency)
-          .maxPendingConnectionAcquires(options.sqsMaxPendingAcquires)
-          .connectionAcquisitionTimeout(Duration.ofSeconds(options.sqsConnectionAcquireTimeout))
-          .build()
-        )
-        .region(Region.of(options.queueRegion))
-        .overrideConfiguration(clientOverrideConfiguration)
-        .credentialsProvider(credentialsProvider)
-        .build
-    } catch {
-    case e: SdkClientException =>
-      logError("Controlled SdkClientException while creating SQS client", e)
-      // Return a fallback SqsAsyncClient instance or handle it in a way that allows the service to continue
-      SqsAsyncClient.builder
-        .region(Region.of(options.queueRegion))
-        .credentialsProvider(credentialsProvider)
-        .build
-    }
+    SqsAsyncClient.builder
+      .httpClient(
+        NettyNioAsyncHttpClient
+        .builder()
+        .maxConcurrency(options.sqsMaxConcurrency)
+        .maxPendingConnectionAcquires(options.sqsMaxPendingAcquires)
+        .connectionAcquisitionTimeout(Duration.ofSeconds(options.sqsConnectionAcquireTimeout))
+        .build()
+      )
+      .region(Region.of(options.queueRegion))
+      .overrideConfiguration(clientOverrideConfiguration)
+      .credentialsProvider(credentialsProvider)
+      .build
+
   }
 }
