@@ -45,7 +45,7 @@ case class S3ConnectorSourceOptions (
   sqsLongPollWaitTimeSeconds: Int,
   sqsVisibilityTimeoutSeconds: Int,
   sqsKeepMessageForConsumerError: Boolean,
-  sqsMaxPendingAcquires: Int,
+  sqsMaxPendingAcquires: Option[Int],
   sqsConnectionAcquireTimeout: Int,
   sqsMaxPoolSize: Int,
 )
@@ -90,7 +90,7 @@ object S3ConnectorSourceOptions {
   val SQS_VISIBILITY_TIMEOUT_DEFAULT_VALUE: Int = 60
 
   val SQS_MAX_PENDING_ACQUIRES: String = SQS_PREFIX + "maxPendingAcquires"
-  val SQS_MAX_PENDING_ACQUIRES_DEFAULT_VALUE: Int = 50
+  // No default: when not set, the AWS SDK Netty client default is used
 
   val SQS_CONNECTION_ACQUIRES_TIMEOUT: String = SQS_PREFIX + "acquisitionTimeout"
   val SQS_CONNECTION_ACQUIRES_TIMEOUT_DEFAULT_VALUE: Int = 60
@@ -183,8 +183,9 @@ object S3ConnectorSourceOptions {
     val queueFetchWaitTimeoutSeconds: Long = withPositiveIntegerParameter(parameters, QUEUE_FETCH_WAIT_TIMEOUT_SECONDS,
       2 * sqsLongPollWaitTimeSeconds)
 
-    val sqsMaxPendingAcquires: Int = withPositiveIntegerParameter(parameters, SQS_MAX_PENDING_ACQUIRES,
-      SQS_MAX_PENDING_ACQUIRES_DEFAULT_VALUE)
+    val sqsMaxPendingAcquires: Option[Int] = parameters.get(SQS_MAX_PENDING_ACQUIRES).map { _ =>
+      withPositiveIntegerParameter(parameters, SQS_MAX_PENDING_ACQUIRES, 0)
+    }
 
     val sqsConnectionAcquireTimeout: Int = withPositiveIntegerParameter(parameters, SQS_CONNECTION_ACQUIRES_TIMEOUT,
       SQS_CONNECTION_ACQUIRES_TIMEOUT_DEFAULT_VALUE)

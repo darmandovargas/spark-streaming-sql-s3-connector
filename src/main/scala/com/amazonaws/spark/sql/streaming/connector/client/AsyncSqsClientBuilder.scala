@@ -65,15 +65,14 @@ class AsyncSqsClientBuilder[T] extends AsyncClientBuilder[T] {
       .retryPolicy(retryPolicy)
       .build
 
+    val httpClientBuilder = NettyNioAsyncHttpClient
+      .builder()
+      .maxConcurrency(options.sqsMaxConcurrency)
+      .connectionAcquisitionTimeout(Duration.ofSeconds(options.sqsConnectionAcquireTimeout))
+    options.sqsMaxPendingAcquires.foreach(httpClientBuilder.maxPendingConnectionAcquires(_))
+
     SqsAsyncClient.builder
-      .httpClient(
-        NettyNioAsyncHttpClient
-        .builder()
-        .maxConcurrency(options.sqsMaxConcurrency)
-        .maxPendingConnectionAcquires(options.sqsMaxPendingAcquires)
-        .connectionAcquisitionTimeout(Duration.ofSeconds(options.sqsConnectionAcquireTimeout))
-        .build()
-      )
+      .httpClient(httpClientBuilder.build())
       .region(Region.of(options.queueRegion))
       .overrideConfiguration(clientOverrideConfiguration)
       .credentialsProvider(credentialsProvider)

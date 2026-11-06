@@ -17,7 +17,7 @@
 
 package com.amazonaws.spark.sql.streaming.connector
 
-import com.amazonaws.spark.sql.streaming.connector.S3ConnectorSourceOptions.{MAX_FILES_PER_TRIGGER, QUEUE_REGION, QUEUE_URL, REPROCESS_DRY_RUN, REPROCESS_END_BATCH_ID, REPROCESS_START_BATCH_ID, S3_FILE_FORMAT}
+import com.amazonaws.spark.sql.streaming.connector.S3ConnectorSourceOptions.{MAX_FILES_PER_TRIGGER, QUEUE_REGION, QUEUE_URL, REPROCESS_DRY_RUN, REPROCESS_END_BATCH_ID, REPROCESS_START_BATCH_ID, S3_FILE_FORMAT, SQS_CONNECTION_ACQUIRES_TIMEOUT, SQS_MAX_PENDING_ACQUIRES, SQS_MAX_POOL_SIZE}
 import org.scalatest.matchers.should.Matchers.convertToAnyShouldWrapper
 
 import org.apache.spark.network.util.JavaUtils
@@ -104,6 +104,31 @@ class S3ConnectorSourceOptionsSuite extends S3ConnectorTestBase  {
       }
 
       exception.getMessage should include("reprocessStartBatchId must be less than or equal to reprocessEndBatchId")
+    }
+
+    test("sqs connection pool options use the previous behavior by default") {
+        val option = S3ConnectorSourceOptions(defaultOptionMap)
+        option.sqsMaxPendingAcquires shouldBe None
+        option.sqsConnectionAcquireTimeout shouldBe 60
+        option.sqsMaxPoolSize shouldBe 200
+    }
+
+    test("sqs connection pool options given a value") {
+        val option = S3ConnectorSourceOptions(defaultOptionMap
+          + (SQS_MAX_PENDING_ACQUIRES -> "5000",
+          SQS_CONNECTION_ACQUIRES_TIMEOUT -> "120",
+          SQS_MAX_POOL_SIZE -> "268")
+        )
+        option.sqsMaxPendingAcquires shouldBe Some(5000)
+        option.sqsConnectionAcquireTimeout shouldBe 120
+        option.sqsMaxPoolSize shouldBe 268
+    }
+
+    test("sqs maxPendingAcquires must be a positive integer") {
+        val exception = intercept[IllegalArgumentException] {
+            S3ConnectorSourceOptions(defaultOptionMap + (SQS_MAX_PENDING_ACQUIRES -> "0"))
+        }
+        exception.getMessage should include("must be a positive integer")
     }
 
 }

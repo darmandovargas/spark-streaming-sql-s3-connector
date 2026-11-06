@@ -209,7 +209,7 @@ spark.s3conn.sqs.maxRetries| 10                                      |maximum nu
 spark.s3conn.sqs.visibilityTimeoutSeconds| 60                                      |SQS message visibility timeout
 spark.s3conn.sqs.keepMessageForConsumerError| false                                   |when set to true, the invalid messages with following reasons in SQS will be kept 1. the file is expired 2. the file doesn't match glob pattern 3. the file is already processed and persisted in RocksDB. This can be used with DLQ when for debug purpose
 spark.s3conn.sqs.maxPoolSize| 200                                     |maximum number of threads used to consume SQS messages and the number of `DeleteMessageBatch` calls sent in parallel. The effective value is `min(sqs.maxConcurrency, sqs.maxPoolSize)`
-spark.s3conn.sqs.maxPendingAcquires| 50                                      |maximum number of requests allowed to wait for a free SQS connection. Requests above `sqs.maxConcurrency + sqs.maxPendingAcquires` fail with `TooManyPendingAcquisitionsException`. Increase it together with `sqs.maxConcurrency` for large `maxFilesPerTrigger` values
+spark.s3conn.sqs.maxPendingAcquires| optional, AWS SDK default                |maximum number of requests allowed to wait for a free SQS connection. Requests above `sqs.maxConcurrency + sqs.maxPendingAcquires` fail with `TooManyPendingAcquisitionsException`. Increase it together with `sqs.maxConcurrency` for large `maxFilesPerTrigger` values
 spark.s3conn.sqs.acquisitionTimeout| 60                                      |time (in seconds) a request waits for a free SQS connection before failing
 
 ## Notes for high-volume queues
