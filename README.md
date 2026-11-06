@@ -208,6 +208,16 @@ spark.s3conn.sqs.maxConcurrency| 50                                      |number
 spark.s3conn.sqs.maxRetries| 10                                      |maximum number of consecutive retries in case of a SQS client connection failure before giving up
 spark.s3conn.sqs.visibilityTimeoutSeconds| 60                                      |SQS message visibility timeout
 spark.s3conn.sqs.keepMessageForConsumerError| false                                   |when set to true, the invalid messages with following reasons in SQS will be kept 1. the file is expired 2. the file doesn't match glob pattern 3. the file is already processed and persisted in RocksDB. This can be used with DLQ when for debug purpose
+spark.s3conn.sqs.maxPoolSize| 200                                     |maximum number of threads used to consume SQS messages and the number of `DeleteMessageBatch` calls sent in parallel. The effective value is `min(sqs.maxConcurrency, sqs.maxPoolSize)`
+spark.s3conn.sqs.maxPendingAcquires| 50                                      |maximum number of requests allowed to wait for a free SQS connection. Requests above `sqs.maxConcurrency + sqs.maxPendingAcquires` fail with `TooManyPendingAcquisitionsException`. Increase it together with `sqs.maxConcurrency` for large `maxFilesPerTrigger` values
+spark.s3conn.sqs.acquisitionTimeout| 60                                      |time (in seconds) a request waits for a free SQS connection before failing
+
+## Notes for high-volume queues
+
+- **SQS deletes run in the background.** Once a batch is persisted in the metadata log, its SQS messages are deleted in waves of `min(sqs.maxConcurrency, sqs.maxPoolSize)` `DeleteMessageBatch` calls (10 messages each) on a separate thread, so a large `maxFilesPerTrigger` (for example 3,000,000 files = 300,000 delete calls) does not hold up the next batch or overflow the connection pool. Keep `sqs.visibilityTimeoutSeconds` longer than the time needed to fetch a batch plus the time needed to delete it, otherwise messages of a batch that is still being deleted can be delivered again. Redelivered messages of files already processed are dropped, they are not processed twice.
+- **Size the SQS connection pool for your batch size.** Set `sqs.maxConcurrency` (connections), `sqs.maxPoolSize` (threads) and `sqs.maxPendingAcquires` (waiting requests) so that `maxConcurrency + maxPendingAcquires` is above the number of concurrent requests. If you see `TooManyPendingAcquisitionsException` or connection acquisition timeouts in the driver log, raise these values or lower `maxFilesPerTrigger`.
+- **Files counted toward `maxFilesPerTrigger`.** Only new files count. Messages for files that were already seen, already processed, expired, or filtered out by `pathGlobFilter` are not counted.
+- **Metadata log format.** The list of files of each batch is stored gzip-compressed in the RocksDB metadata log to keep each `add` small. A checkpoint written by an older version is still readable by this version (uncompressed entries are detected automatically), but a checkpoint that already contains batches written by this version can not be read by an older version. Do not roll back to an older connector version on an existing checkpoint after upgrading.
 
 ## How to use S3 event notifications for multiple applications
 
