@@ -22,7 +22,7 @@ import scala.util.{Failure, Success, Try}
 import scala.util.control.NonFatal
 
 import com.amazonaws.spark.sql.streaming.connector.S3ConnectorSource.REPROCESS_LOCK_FILE
-import com.amazonaws.spark.sql.streaming.connector.S3ConnectorSourceOptions.SQS_QUEUE
+import com.amazonaws.spark.sql.streaming.connector.S3ConnectorSourceOptions.{FILES_PER_TASK, MIN_READ_TASKS, READ_WITHOUT_LISTING, SQS_QUEUE}
 import com.amazonaws.spark.sql.streaming.connector.Utils.reportTimeTaken
 import com.amazonaws.spark.sql.streaming.connector.client.{AsyncQueueClient, AsyncSqsClientBuilder}
 import com.amazonaws.spark.sql.streaming.connector.metadataLog.{RocksDBS3SourceLog, S3MetadataLog}
@@ -33,6 +33,7 @@ import org.apache.spark.sql.{DataFrame, SparkSession}
 import org.apache.spark.sql.execution.datasources.{DataSource, LogicalRelation}
 import org.apache.spark.sql.execution.streaming._
 import org.apache.spark.sql.execution.streaming.FileStreamSource._
+import org.apache.spark.sql.sources.BaseRelation
 import org.apache.spark.sql.streaming.connector.s3.S3SparkUtils
 import org.apache.spark.sql.types.StructType
 
@@ -66,6 +67,21 @@ class S3ConnectorSource[T](sparkSession: SparkSession,
   }
 
   private val fileValidator = new S3ConnectorFileValidator(sourceOptions, fileCache, metadataLog)
+
+  private def confValue(key: String): Option[String] =
+    options.get(key).orElse(sparkSession.sparkContext.getConf.getOption(key))
+
+  private val readWithoutListing: Boolean =
+    confValue(READ_WITHOUT_LISTING).forall(_.toBoolean) &&
+      S3ConnectorTextRelation.supports(sourceOptions.fileFormat, userSchema.getOrElse(StructType(Nil)),
+        partitionColumns, options)
+
+  private val filesPerTask: Int = confValue(FILES_PER_TASK).map(_.toInt).getOrElse(256)
+
+  private val minReadTasks: Int = math.max(1,
+    confValue(MIN_READ_TASKS).map(_.toInt).getOrElse(sparkSession.sparkContext.defaultParallelism))
+
+  logInfo(s"getBatch reads files ${if (readWithoutListing) "without" else "with"} listing")
 
   private val queueClient: AsyncQueueClient[T] = sourceOptions.queueType match {
     case SQS_QUEUE =>
@@ -174,17 +190,29 @@ class S3ConnectorSource[T](sparkSession: SparkSession,
     logInfo(s"getBatch processing ${files.length} files from ${startOffset + 1}:$endOffset")
     logTrace(s"Files are:\n\t" + files.mkString("\n\t"))
 
-    val newDataSource =
-      DataSource(
-        sparkSession,
-        paths = files.map(f => new Path(new URI(f.path)).toString),
-        userSpecifiedSchema = Some(schema),
-        partitionColumns = partitionColumns,
-        className = sourceOptions.fileFormat,
-        options = options)
+    val paths = files.map(f => new Path(new URI(f.path)).toString)
 
-    S3SparkUtils.ofRows(sparkSession, LogicalRelation(newDataSource.resolveRelation(
-      checkFilesExist = false), isStreaming = true))
+    val relation: BaseRelation =
+      if (readWithoutListing) {
+        new S3ConnectorTextRelation(
+          sparkSession.sqlContext,
+          paths,
+          schema,
+          sparkSession.sessionState.newHadoopConfWithOptions(options),
+          filesPerTask,
+          sparkSession.sessionState.conf.ignoreMissingFiles,
+          minReadTasks)
+      } else {
+        DataSource(
+          sparkSession,
+          paths = paths,
+          userSpecifiedSchema = Some(schema),
+          partitionColumns = partitionColumns,
+          className = sourceOptions.fileFormat,
+          options = options).resolveRelation(checkFilesExist = false)
+      }
+
+    S3SparkUtils.ofRows(sparkSession, LogicalRelation(relation, isStreaming = true))
   }
 
   /*
