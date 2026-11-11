@@ -66,6 +66,8 @@ object S3ConnectorSourceOptions {
   val READ_WITHOUT_LISTING: String = PREFIX + "readWithoutListing"
   val FILES_PER_TASK: String = PREFIX + "filesPerTask"
   val MIN_READ_TASKS: String = PREFIX + "minReadTasks"
+  val READ_CONCURRENCY: String = PREFIX + "readConcurrency"
+  val MAX_BUFFERED_FILE_BYTES: String = PREFIX + "maxBufferedFileBytes"
   val QUEUE_URL: String = PREFIX + "queueUrl"
   val QUEUE_REGION: String = PREFIX + "queueRegion"
   val QUEUE_TYPE: String = PREFIX + "queueType"

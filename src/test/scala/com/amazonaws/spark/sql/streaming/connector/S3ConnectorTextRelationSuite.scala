@@ -130,16 +130,24 @@ class S3ConnectorTextRelationSuite extends S3ConnectorTestBase with SharedSparkS
     }
   }
 
-  test("numReadTasks spreads small batches over the cores and leaves big batches unchanged") {
+  test("numReadTasks spreads small batches over 4 tasks per core and leaves big batches unchanged") {
     def tasks(files: Int, perTask: Int, minTasks: Int): Int =
       S3ConnectorTextRelation.numReadTasks(files, perTask, minTasks)
+    def defaultTasks(files: Int, cores: Int): Int =
+      tasks(files, 256, S3ConnectorTextRelation.defaultMinReadTasks(cores))
+
+    S3ConnectorTextRelation.defaultMinReadTasks(8) shouldBe 32
+    S3ConnectorTextRelation.defaultMinReadTasks(40) shouldBe 160
+    S3ConnectorTextRelation.defaultMinReadTasks(0) shouldBe 4
 
     Seq(
-      // files, minTasks (defaultParallelism), expected
-      (0, 40, 1), (1, 40, 1), (10, 40, 10), (1000, 40, 40), (10000, 40, 40), (3000000, 40, 11719),
-      (0, 8, 1), (1, 8, 1), (10, 8, 8), (1000, 8, 8), (10000, 8, 40), (3000000, 8, 11719)
-    ).foreach { case (files, minTasks, expected) =>
-      withClue(s"files=$files minTasks=$minTasks: ") { tasks(files, 256, minTasks) shouldBe expected }
+      // files, cores (defaultParallelism), expected tasks
+      (0, 40, 1), (1, 40, 1), (10, 40, 10), (1000, 40, 160), (3000, 40, 160), (10000, 40, 160),
+      (40960, 40, 160), (100000, 40, 391), (3000000, 40, 11719),
+      (0, 8, 1), (1, 8, 1), (10, 8, 10), (200, 8, 32), (1000, 8, 32), (3000, 8, 32), (8192, 8, 32),
+      (10000, 8, 40), (3000000, 8, 11719)
+    ).foreach { case (files, cores, expected) =>
+      withClue(s"files=$files cores=$cores: ") { defaultTasks(files, cores) shouldBe expected }
     }
 
     // override with a larger minimum and a degenerate one
@@ -148,7 +156,7 @@ class S3ConnectorTextRelationSuite extends S3ConnectorTestBase with SharedSparkS
     tasks(1000, 0, 1) shouldBe 1000
 
     // batches of minTasks * filesPerTask files or more are exactly ceil(files / filesPerTask)
-    Seq(40, 8, 100).foreach { minTasks =>
+    Seq(160, 32, 100).foreach { minTasks =>
       Seq(256, 100, 1).foreach { perTask =>
         val files = minTasks * perTask
         tasks(files, perTask, minTasks) shouldBe math.ceil(files.toDouble / perTask).toInt

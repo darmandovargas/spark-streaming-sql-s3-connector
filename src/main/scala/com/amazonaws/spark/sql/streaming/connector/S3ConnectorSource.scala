@@ -22,7 +22,7 @@ import scala.util.{Failure, Success, Try}
 import scala.util.control.NonFatal
 
 import com.amazonaws.spark.sql.streaming.connector.S3ConnectorSource.REPROCESS_LOCK_FILE
-import com.amazonaws.spark.sql.streaming.connector.S3ConnectorSourceOptions.{FILES_PER_TASK, MIN_READ_TASKS, READ_WITHOUT_LISTING, SQS_QUEUE}
+import com.amazonaws.spark.sql.streaming.connector.S3ConnectorSourceOptions.{FILES_PER_TASK, MAX_BUFFERED_FILE_BYTES, MIN_READ_TASKS, READ_CONCURRENCY, READ_WITHOUT_LISTING, SQS_QUEUE}
 import com.amazonaws.spark.sql.streaming.connector.Utils.reportTimeTaken
 import com.amazonaws.spark.sql.streaming.connector.client.{AsyncQueueClient, AsyncSqsClientBuilder}
 import com.amazonaws.spark.sql.streaming.connector.metadataLog.{RocksDBS3SourceLog, S3MetadataLog}
@@ -79,9 +79,17 @@ class S3ConnectorSource[T](sparkSession: SparkSession,
   private val filesPerTask: Int = confValue(FILES_PER_TASK).map(_.toInt).getOrElse(256)
 
   private val minReadTasks: Int = math.max(1,
-    confValue(MIN_READ_TASKS).map(_.toInt).getOrElse(sparkSession.sparkContext.defaultParallelism))
+    confValue(MIN_READ_TASKS).map(_.toInt).getOrElse(
+      S3ConnectorTextRelation.defaultMinReadTasks(sparkSession.sparkContext.defaultParallelism)))
 
-  logInfo(s"getBatch reads files ${if (readWithoutListing) "without" else "with"} listing")
+  private val readConcurrency: Int = math.max(1,
+    confValue(READ_CONCURRENCY).map(_.toInt).getOrElse(S3ConnectorTextRelation.DefaultReadConcurrency))
+
+  private val maxBufferedFileBytes: Long = math.max(1L,
+    confValue(MAX_BUFFERED_FILE_BYTES).map(_.toLong).getOrElse(S3ConnectorTextRelation.DefaultMaxBufferedFileBytes))
+
+  logInfo(s"getBatch reads files ${if (readWithoutListing) "without" else "with"} listing, " +
+    s"readConcurrency=$readConcurrency maxBufferedFileBytes=$maxBufferedFileBytes")
 
   private val queueClient: AsyncQueueClient[T] = sourceOptions.queueType match {
     case SQS_QUEUE =>
@@ -201,7 +209,9 @@ class S3ConnectorSource[T](sparkSession: SparkSession,
           sparkSession.sessionState.newHadoopConfWithOptions(options),
           filesPerTask,
           sparkSession.sessionState.conf.ignoreMissingFiles,
-          minReadTasks)
+          minReadTasks,
+          readConcurrency,
+          maxBufferedFileBytes)
       } else {
         DataSource(
           sparkSession,
