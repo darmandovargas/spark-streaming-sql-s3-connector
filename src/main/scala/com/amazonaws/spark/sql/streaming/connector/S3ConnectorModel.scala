@@ -22,7 +22,9 @@ package com.amazonaws.spark.sql.streaming.connector
  */
 case class QueueMessageDesc[T](timestampMs: Long,
                             isProcessed: Boolean = false,
-                            messageId: Option[T])
+                            messageId: Option[T],
+                            sizeBytes: Option[Long] = None,
+                            eTag: Option[String] = None)
 
 
 /**
@@ -31,4 +33,6 @@ case class QueueMessageDesc[T](timestampMs: Long,
  */
 case class FileMetadata[T](filePath: String,
                         timestampMs: Long,
-                        messageId: Option[T])
+                        messageId: Option[T],
+                        sizeBytes: Option[Long] = None,
+                        eTag: Option[String] = None)

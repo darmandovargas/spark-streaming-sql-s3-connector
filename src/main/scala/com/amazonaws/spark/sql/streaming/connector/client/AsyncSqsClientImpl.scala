@@ -370,8 +370,12 @@ class AsyncSqsClientImpl[T] (client: SqsAsyncClient,
         logDebug("Successfully parsed sqs message")
         metrics.parseMessageCounter.inc()
 
+        val objectJson = messageJson \ "Records" \ "s3" \ "object"
+        val sizeBytes = (objectJson \ "size").extractOpt[Array[Long]].flatMap(_.headOption)
+        val eTag = (objectJson \ "eTag").extractOpt[Array[String]].flatMap(_.headOption)
+
         Some(FileMetadata(URLDecoder.decode(path, StandardCharsets.UTF_8.name()),
-          timestampMills, Some(messageReceiptHandle.asInstanceOf[T])))
+          timestampMills, Some(messageReceiptHandle.asInstanceOf[T]), sizeBytes, eTag))
       }
       else {
         logDebug(s"Discarded event ${eventName}")

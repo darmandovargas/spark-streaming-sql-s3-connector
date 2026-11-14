@@ -22,7 +22,7 @@ import scala.util.{Failure, Success, Try}
 import scala.util.control.NonFatal
 
 import com.amazonaws.spark.sql.streaming.connector.S3ConnectorSource.REPROCESS_LOCK_FILE
-import com.amazonaws.spark.sql.streaming.connector.S3ConnectorSourceOptions.SQS_QUEUE
+import com.amazonaws.spark.sql.streaming.connector.S3ConnectorSourceOptions.{FILES_PER_TASK, MAX_BUFFERED_FILE_BYTES, MIN_READ_TASKS, READ_CONCURRENCY, READ_WITHOUT_LISTING, SKIP_HEAD_WITH_EVENT_SIZE, SQS_QUEUE}
 import com.amazonaws.spark.sql.streaming.connector.Utils.reportTimeTaken
 import com.amazonaws.spark.sql.streaming.connector.client.{AsyncQueueClient, AsyncSqsClientBuilder}
 import com.amazonaws.spark.sql.streaming.connector.metadataLog.{RocksDBS3SourceLog, S3MetadataLog}
@@ -33,6 +33,7 @@ import org.apache.spark.sql.{DataFrame, SparkSession}
 import org.apache.spark.sql.execution.datasources.{DataSource, LogicalRelation}
 import org.apache.spark.sql.execution.streaming._
 import org.apache.spark.sql.execution.streaming.FileStreamSource._
+import org.apache.spark.sql.sources.BaseRelation
 import org.apache.spark.sql.streaming.connector.s3.S3SparkUtils
 import org.apache.spark.sql.types.StructType
 
@@ -67,6 +68,36 @@ class S3ConnectorSource[T](sparkSession: SparkSession,
 
   private val fileValidator = new S3ConnectorFileValidator(sourceOptions, fileCache, metadataLog)
 
+  private def confValue(key: String): Option[String] =
+    options.get(key).orElse(sparkSession.sparkContext.getConf.getOption(key))
+
+  private val readWithoutListing: Boolean =
+    confValue(READ_WITHOUT_LISTING).forall(_.toBoolean) &&
+      S3ConnectorTextRelation.supports(sourceOptions.fileFormat, userSchema.getOrElse(StructType(Nil)),
+        partitionColumns, options)
+
+  // Size and eTag of every file of a batch, taken from the S3 event, kept only in memory (never persisted) until the
+  // batch is committed. getBatch gives them to S3A so it does not need a HEAD request per file. A batch that is
+  // replayed after a restart has no entry and reads as before (HEAD + GET).
+  private val skipHeadWithEventSize: Boolean = readWithoutListing &&
+    confValue(SKIP_HEAD_WITH_EVENT_SIZE).exists(_.toBoolean)
+  private val knownFileInfo = new java.util.concurrent.ConcurrentHashMap[Long, java.util.HashMap[String, (Long, String)]]()
+
+  private val filesPerTask: Int = confValue(FILES_PER_TASK).map(_.toInt).getOrElse(256)
+
+  private val minReadTasks: Int = math.max(1,
+    confValue(MIN_READ_TASKS).map(_.toInt).getOrElse(
+      S3ConnectorTextRelation.defaultMinReadTasks(sparkSession.sparkContext.defaultParallelism)))
+
+  private val readConcurrency: Int = math.max(1,
+    confValue(READ_CONCURRENCY).map(_.toInt).getOrElse(S3ConnectorTextRelation.DefaultReadConcurrency))
+
+  private val maxBufferedFileBytes: Long = math.max(1L,
+    confValue(MAX_BUFFERED_FILE_BYTES).map(_.toLong).getOrElse(S3ConnectorTextRelation.DefaultMaxBufferedFileBytes))
+
+  logInfo(s"getBatch reads files ${if (readWithoutListing) "without" else "with"} listing, " +
+    s"readConcurrency=$readConcurrency maxBufferedFileBytes=$maxBufferedFileBytes")
+
   private val queueClient: AsyncQueueClient[T] = sourceOptions.queueType match {
     case SQS_QUEUE =>
       var sqsClient: AsyncQueueClient[T] = null
@@ -77,7 +108,7 @@ class S3ConnectorSource[T](sparkSession: SparkSession,
         (msg: FileMetadata[T]) => {
           val validateResult = fileValidator.isValidNewFile(msg.filePath, msg.timestampMs)
           if (validateResult == FileValidResults.Ok) {
-            val msgDesc = QueueMessageDesc[T](msg.timestampMs, isProcessed = false, msg.messageId)
+            val msgDesc = QueueMessageDesc[T](msg.timestampMs, isProcessed = false, msg.messageId, msg.sizeBytes, msg.eTag)
             val result = fileCache.addIfAbsent(msg.filePath, msgDesc)
             if (result != msgDesc) {
               // isValidNewFile and addIfAbsent are not atomic: a concurrent thread inserted the same
@@ -174,17 +205,50 @@ class S3ConnectorSource[T](sparkSession: SparkSession,
     logInfo(s"getBatch processing ${files.length} files from ${startOffset + 1}:$endOffset")
     logTrace(s"Files are:\n\t" + files.mkString("\n\t"))
 
-    val newDataSource =
-      DataSource(
-        sparkSession,
-        paths = files.map(f => new Path(new URI(f.path)).toString),
-        userSpecifiedSchema = Some(schema),
-        partitionColumns = partitionColumns,
-        className = sourceOptions.fileFormat,
-        options = options)
+    val paths = files.map { f =>
+      val p = new Path(new URI(f.path)).toString
+      if (skipHeadWithEventSize) {
+        lookupKnownInfo(startOffset + 1, endOffset, f.path)
+          .map { case (size, tag) => S3ConnectorTextRelation.withKnownInfo(p, size, tag) }.getOrElse(p)
+      } else {
+        p
+      }
+    }
 
-    S3SparkUtils.ofRows(sparkSession, LogicalRelation(newDataSource.resolveRelation(
-      checkFilesExist = false), isStreaming = true))
+    val relation: BaseRelation =
+      if (readWithoutListing) {
+        new S3ConnectorTextRelation(
+          sparkSession.sqlContext,
+          paths,
+          schema,
+          sparkSession.sessionState.newHadoopConfWithOptions(options),
+          filesPerTask,
+          sparkSession.sessionState.conf.ignoreMissingFiles,
+          minReadTasks,
+          readConcurrency,
+          maxBufferedFileBytes)
+      } else {
+        DataSource(
+          sparkSession,
+          paths = paths,
+          userSpecifiedSchema = Some(schema),
+          partitionColumns = partitionColumns,
+          className = sourceOptions.fileFormat,
+          options = options).resolveRelation(checkFilesExist = false)
+      }
+
+    S3SparkUtils.ofRows(sparkSession, LogicalRelation(relation, isStreaming = true))
+  }
+
+  private def lookupKnownInfo(startId: Long, endId: Long, path: String): Option[(Long, String)] = {
+    var id = startId
+    var found: Option[(Long, String)] = None
+    while (found.isEmpty && id <= endId) {
+      val m = knownFileInfo.get(id)
+      if (m != null) found = Option(m.get(path))
+      id += 1
+    }
+    found
   }
 
   /*
@@ -212,14 +276,21 @@ class S3ConnectorSource[T](sparkSession: SparkSession,
     if (batchFiles.nonEmpty) {
       metadataLogCurrentOffset += 1
       val addSuccess = metadataLog.add(metadataLogCurrentOffset, batchFiles.map {
-        case FileMetadata(path, timestamp, _) =>
+        case FileMetadata(path, timestamp, _, _, _) =>
           FileEntry(path = path, timestamp = timestamp, batchId = metadataLogCurrentOffset)
       }.toArray)
 
       if (addSuccess) {
         logInfo(s"Log offset set to $metadataLogCurrentOffset with ${batchFiles.size} new files")
+        if (skipHeadWithEventSize) {
+          val info = new java.util.HashMap[String, (Long, String)](math.max(16, batchFiles.size * 2))
+          batchFiles.foreach { f =>
+            for (size <- f.sizeBytes; tag <- f.eTag if tag.nonEmpty) info.put(f.filePath, (size, tag))
+          }
+          knownFileInfo.put(metadataLogCurrentOffset, info)
+        }
         val messageIds = batchFiles.map {
-          case FileMetadata(path, _, messageId) =>
+          case FileMetadata(path, _, messageId, _, _) =>
             fileCache.markProcessed(path)
             logDebug(s"New file in fetchMaxOffset: $path")
             messageId
@@ -253,6 +324,10 @@ class S3ConnectorSource[T](sparkSession: SparkSession,
   }
 
   override def commit(end: Offset): Unit = {
+    val committed = FileStreamSourceOffset(end).logOffset
+    knownFileInfo.keySet().removeIf(new java.util.function.Predicate[Long] {
+      override def test(id: Long): Boolean = id <= committed
+    })
     purgeCache()
     metadataLog.commit()
     logQueueClientMetrics()
