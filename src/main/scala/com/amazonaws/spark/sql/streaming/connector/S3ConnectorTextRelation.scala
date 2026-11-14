@@ -22,9 +22,10 @@ import java.util.concurrent.{Callable, ExecutionException, Executors, Future, Se
 import java.util.concurrent.atomic.AtomicInteger
 
 import scala.collection.JavaConverters._
+import scala.util.control.NonFatal
 
 import org.apache.hadoop.conf.Configuration
-import org.apache.hadoop.fs.Path
+import org.apache.hadoop.fs.{FileStatus, FileSystem, FSDataInputStream, Path}
 import org.apache.hadoop.io.Text
 import org.apache.hadoop.io.compress.CompressionCodecFactory
 import org.apache.hadoop.util.LineReader
@@ -62,8 +63,9 @@ class S3ConnectorTextRelation(
       confEntries.value.foreach { case (k, v) => conf.set(k, v) }
       val codecs = new CompressionCodecFactory(conf)
       if (concurrency <= 1) {
-        pathIter.flatMap { p =>
-          S3ConnectorTextRelation.readLines(new Path(p), conf, codecs, ignoreMissing)
+        pathIter.flatMap { target =>
+          val (p, known) = S3ConnectorTextRelation.parseTarget(target)
+          S3ConnectorTextRelation.readLines(new Path(p), conf, codecs, ignoreMissing, known)
         }
       } else {
         S3ConnectorTextRelation.readConcurrently(pathIter, conf, codecs, ignoreMissing, concurrency, maxBuffered)
@@ -73,6 +75,61 @@ class S3ConnectorTextRelation(
 }
 
 object S3ConnectorTextRelation {
+
+  // A read target is the path, optionally followed by the size and the eTag of the object taken from the S3 event,
+  // separated by \u0001. With a known size S3A does not send a HEAD request before reading the file.
+  private val InfoSeparator = '\u0001'
+
+  def withKnownInfo(path: String, sizeBytes: Long, eTag: String): String =
+    path + InfoSeparator + sizeBytes + InfoSeparator + eTag
+
+  private[connector] def parseTarget(target: String): (String, Option[(Long, String)]) = {
+    if (target.indexOf(InfoSeparator) < 0) {
+      (target, None)
+    } else {
+      // limit -1 keeps a trailing empty eTag as a part (the default split would drop it and lose the known size)
+      val parts = target.split(InfoSeparator.toString, -1)
+      val known =
+        if (parts.length == 3) scala.util.Try(parts(1).toLong).toOption.filter(_ >= 0).map(s => (s, parts(2))) else None
+      (parts(0), known)
+    }
+  }
+
+  // Opens the file with a file status built from the event size so S3A skips its HEAD request. The eTag of the
+  // event is deliberately not given to S3A: a different eTag format could make its change detection fail the read.
+  // Any problem (Hadoop without openFile, other file system, unexpected class) falls back to the normal open.
+  private[connector] def openKnown(fs: FileSystem, path: Path, known: Option[(Long, String)]): FSDataInputStream = {
+    known match {
+      case Some((size, _)) =>
+        try {
+          openWithStatus(fs, path, size)
+        } catch {
+          case fnf: FileNotFoundException => throw fnf
+          case NonFatal(_) => fs.open(path)
+        }
+      case None => fs.open(path)
+    }
+  }
+
+  private def openWithStatus(fs: FileSystem, path: Path, size: Long): FSDataInputStream = {
+    val qualified = fs.makeQualified(path)
+    val statusClass = Class.forName("org.apache.hadoop.fs.s3a.S3AFileStatus")
+    val ctor = statusClass.getConstructor(classOf[Long], classOf[Long], classOf[Path], classOf[Long],
+      classOf[String], classOf[String], classOf[String])
+    val status = ctor.newInstance(Long.box(size), Long.box(0L), qualified, Long.box(1L), "", null, null)
+      .asInstanceOf[FileStatus]
+    val builderClass = Class.forName("org.apache.hadoop.fs.FutureDataInputStreamBuilder")
+    val builder = fs.getClass.getMethod("openFile", classOf[Path]).invoke(fs, qualified)
+    val withStatus = builderClass.getMethod("withFileStatus", classOf[FileStatus]).invoke(builder, status)
+    val future = builderClass.getMethod("build").invoke(withStatus)
+      .asInstanceOf[java.util.concurrent.CompletableFuture[FSDataInputStream]]
+    try {
+      future.get()
+    } catch {
+      case e: ExecutionException if e.getCause.isInstanceOf[FileNotFoundException] =>
+        throw e.getCause
+    }
+  }
 
   val DefaultReadConcurrency: Int = 8
   val DefaultMaxBufferedFileBytes: Long = 8L * 1024 * 1024
@@ -112,11 +169,12 @@ object S3ConnectorTextRelation {
       path: Path,
       conf: Configuration,
       codecs: CompressionCodecFactory,
-      ignoreMissing: Boolean): Iterator[Row] = {
+      ignoreMissing: Boolean,
+      known: Option[(Long, String)] = None): Iterator[Row] = {
     val fs = path.getFileSystem(conf)
     val raw: InputStream =
       try {
-        fs.open(path)
+        openKnown(fs, path, known)
       } catch {
         case _: FileNotFoundException if ignoreMissing => return Iterator.empty
       }
@@ -213,12 +271,13 @@ object S3ConnectorTextRelation {
     private def closeQuietly(c: AutoCloseable): Unit =
       if (c != null) try c.close() catch { case _: Throwable => }
 
-    private def fetch(p: String): Fetched = {
+    private def fetch(target: String): Fetched = {
+      val (p, known) = parseTarget(target)
       val path = new Path(p)
       val fs = path.getFileSystem(conf)
       val in: InputStream =
         try {
-          fs.open(path)
+          openKnown(fs, path, known)
         } catch {
           case _: FileNotFoundException if ignoreMissing => return Fetched(path, null, null)
         }
@@ -237,6 +296,12 @@ object S3ConnectorTextRelation {
           Fetched(path, null, null)
         } else if (eof) {
           closeQuietly(in)
+          known.foreach { case (size, _) =>
+            if (size != total) {
+              throw new java.io.IOException(
+                s"File $path has $total bytes but the S3 event said $size: refusing to use the event size")
+            }
+          }
           Fetched(path, out.toByteArray, null)
         } else {
           Fetched(path, out.toByteArray, in)

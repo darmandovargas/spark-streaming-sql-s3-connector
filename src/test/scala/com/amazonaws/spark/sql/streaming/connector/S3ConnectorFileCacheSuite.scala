@@ -135,5 +135,16 @@ class S3ConnectorFileCacheSuite extends S3ConnectorTestBase {
       FileMetadata("/test/path3", 200, Some("handle3")))
   }
 
-}
+  test("getUnprocessedFiles keeps the size and eTag of the S3 event") {
+    val cache = new S3ConnectorFileCache[String](5000)
+    cache.add("/test/p1", QueueMessageDesc[String](1000, isProcessed = false, Some("h1"), Some(2048L), Some("tag1")))
+    cache.add("/test/p2", QueueMessageDesc[String](1001, isProcessed = false, Some("h2")))
 
+    cache.getUnprocessedFiles(None).toSet shouldEqual Set(
+      FileMetadata("/test/p1", 1000, Some("h1"), Some(2048L), Some("tag1")),
+      FileMetadata("/test/p2", 1001, Some("h2")))
+
+    cache.markProcessed("/test/p1")
+    cache.getUnprocessedFiles(None).toSet shouldEqual Set(FileMetadata("/test/p2", 1001, Some("h2")))
+  }
+}

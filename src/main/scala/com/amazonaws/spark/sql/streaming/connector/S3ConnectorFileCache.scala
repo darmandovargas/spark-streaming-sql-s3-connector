@@ -121,7 +121,7 @@ class S3ConnectorFileCache[T](maxFileAgeMs: Long) extends Logging {
       val file = iterator.next()
 
       if (!file._2.isProcessed && file._2.timestampMs >= lastPurgeTimestamp) {
-        uncommittedFiles += FileMetadata(file._1, file._2.timestampMs, file._2.messageId)
+        uncommittedFiles += FileMetadata(file._1, file._2.timestampMs, file._2.messageId, file._2.sizeBytes, file._2.eTag)
       }
     }
     uncommittedFiles.toList
@@ -131,7 +131,7 @@ class S3ConnectorFileCache[T](maxFileAgeMs: Long) extends Logging {
     fileMap.asScala.foldLeft(List[FileMetadata[T]]()) {
       (list, file) =>
         if (!file._2.isProcessed && file._2.timestampMs >= lastPurgeTimestamp) {
-          list :+ FileMetadata[T](file._1, file._2.timestampMs, file._2.messageId)
+          list :+ FileMetadata[T](file._1, file._2.timestampMs, file._2.messageId, file._2.sizeBytes, file._2.eTag)
         } else {
           list
         }
@@ -155,8 +155,7 @@ class S3ConnectorFileCache[T](maxFileAgeMs: Long) extends Logging {
 
   /** Mark file entry as committed or already processed */
   def markProcessed(path: String): Unit = {
-    fileMap.replace(path, QueueMessageDesc(
-      fileMap.get(path).timestampMs, isProcessed = true, fileMap.get(path).messageId))
+    fileMap.replace(path, fileMap.get(path).copy(isProcessed = true))
   }
 
   def size: Int = fileMap.size()

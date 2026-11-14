@@ -545,6 +545,26 @@ class AsyncSqsClientSuite extends S3ConnectorTestBase{
     verifyMetrics(asyncClient.metrics, expectedDeleteMessageFailedCount = 1)
   }
 
+  test ("the parsed S3 event carries the object size and eTag") {
+    setMockReceiveMassageResponseFirstSuccessAndRestEmpty(mockAsyncClient, objectCreatedMsg, 1)
+    setMockDeleteMassageResponse(mockAsyncClient)
+    val seen = new java.util.concurrent.ConcurrentLinkedQueue[FileMetadata[String]]()
+    val sourceOptions = S3ConnectorSourceOptions(defaultOptionMap)
+    val client = new AsyncSqsClientImpl[String](
+      mockAsyncClient,
+      sourceOptions,
+      Some((data: FileMetadata[String]) => { seen.add(data); true })
+    )
+    try {
+      client.asyncFetch(sourceOptions.queueFetchWaitTimeoutSeconds)
+      seen.size() shouldBe 1
+      seen.peek().sizeBytes shouldBe Some(16L)
+      seen.peek().eTag shouldBe Some("etag")
+    } finally {
+      client.close()
+    }
+  }
+
   test ("run SQS async fetch") {
     setMockReceiveMassageResponseFirstSuccessAndRestEmpty(mockAsyncClient, objectCreatedMsg, SUCCESS_RECEIVE_MSG_CNT)
     setMockDeleteMassageResponse(mockAsyncClient)

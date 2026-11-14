@@ -228,4 +228,55 @@ class S3ConnectorTextRelationSuite extends S3ConnectorTestBase with SharedSparkS
       viaRelation(Seq(p)).schema shouldBe textSchema
     }
   }
+
+  test("a read target carries the size and eTag of the S3 event") {
+    val target = S3ConnectorTextRelation.withKnownInfo("s3://bucket/key", 42L, "abc")
+    S3ConnectorTextRelation.parseTarget(target) shouldBe (("s3://bucket/key", Some((42L, "abc"))))
+    S3ConnectorTextRelation.parseTarget("s3://bucket/key") shouldBe (("s3://bucket/key", None))
+    S3ConnectorTextRelation.parseTarget(S3ConnectorTextRelation.withKnownInfo("s3://bucket/key", 42L, "")) shouldBe
+      (("s3://bucket/key", Some((42L, ""))))
+    S3ConnectorTextRelation.parseTarget("s3://bucket/key\u0001notanumber\u0001abc")._2 shouldBe None
+    S3ConnectorTextRelation.parseTarget("s3://bucket/key\u0001-5\u0001abc")._2 shouldBe None
+  }
+
+  private def newConcurrentRelation(paths: Seq[String]) =
+    new S3ConnectorTextRelation(spark.sqlContext, paths, textSchema, spark.sessionState.newHadoopConf(),
+      256, false, 1, 4)
+
+  test("a known size on a file system that cannot skip the HEAD falls back to a normal open") {
+    withTestTempDir { dir =>
+      val content = "line1\nline2\nline3\n"
+      val p = write(dir, "known", content)
+      val size = content.getBytes(StandardCharsets.UTF_8).length.toLong
+      val target = S3ConnectorTextRelation.withKnownInfo(p, size, "etag")
+      sorted(viaRelation(Seq(target))) shouldBe Seq("line1", "line2", "line3")
+      sorted(S3SparkUtils.ofRows(spark, LogicalRelation(newConcurrentRelation(Seq(target)), isStreaming = false))) shouldBe
+        Seq("line1", "line2", "line3")
+    }
+  }
+
+  test("an empty file with a known size of 0 gives no lines, and a wrong size on an empty file fails") {
+    withTestTempDir { dir =>
+      val p = write(dir, "empty", "")
+      val ok = S3ConnectorTextRelation.withKnownInfo(p, 0L, "etag")
+      viaRelation(Seq(ok)).collect() shouldBe empty
+      S3SparkUtils.ofRows(spark, LogicalRelation(newConcurrentRelation(Seq(ok)), isStreaming = false)).collect() shouldBe empty
+      val bad = S3ConnectorTextRelation.withKnownInfo(p, 7L, "etag")
+      val e = intercept[Exception] {
+        S3SparkUtils.ofRows(spark, LogicalRelation(newConcurrentRelation(Seq(bad)), isStreaming = false)).collect()
+      }
+      e.getMessage should include("S3 event said 7")
+    }
+  }
+
+  test("a known size that differs from the real size fails instead of returning truncated data") {
+    withTestTempDir { dir =>
+      val p = write(dir, "wrongsize", "a\nb\n")
+      val target = S3ConnectorTextRelation.withKnownInfo(p, 99L, "etag")
+      val e = intercept[Exception] {
+        S3SparkUtils.ofRows(spark, LogicalRelation(newConcurrentRelation(Seq(target)), isStreaming = false)).collect()
+      }
+      e.getMessage should include("S3 event said 99")
+    }
+  }
 }

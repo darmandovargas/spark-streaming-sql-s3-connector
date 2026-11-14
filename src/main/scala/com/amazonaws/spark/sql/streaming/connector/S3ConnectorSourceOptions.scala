@@ -64,6 +64,7 @@ object S3ConnectorSourceOptions {
   val MAX_FILE_AGE: String = PREFIX + "maxFileAge"
   val PARTITION_COLUMNS: String = PREFIX + "partitionColumns"
   val READ_WITHOUT_LISTING: String = PREFIX + "readWithoutListing"
+  val SKIP_HEAD_WITH_EVENT_SIZE: String = PREFIX + "skipHeadWithEventSize"
   val FILES_PER_TASK: String = PREFIX + "filesPerTask"
   val MIN_READ_TASKS: String = PREFIX + "minReadTasks"
   val READ_CONCURRENCY: String = PREFIX + "readConcurrency"
